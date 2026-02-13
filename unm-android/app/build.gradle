@@ -1,0 +1,92 @@
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.rustAndroidGradle)
+}
+
+android {
+    namespace 'org.bevyengine.example'
+    compileSdk 34
+    // 确保 NDK 版本与你的 Rust 工具链一致
+    ndkVersion = "26.1.10909125"
+
+    defaultConfig {
+        applicationId "org.bevyengine.example"
+        minSdk 32
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        ndk {
+            // 保持单一架构，避免混淆
+            abiFilters 'arm64-v8a'
+        }
+
+        // 核心修复：通过 cmake 配置告知 AGP 使用 c++_shared
+        // 即使你主要用 Rust，这也会引导 AGP 正确打包 NDK 里的 STL
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_shared"
+            }
+        }
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    buildFeatures {
+        viewBinding true
+    }
+
+    sourceSets {
+        main {
+            // 资产路径保持不变
+            assets.srcDirs += files('../../unm/assets')
+            res.srcDirs += files('../../unm/assets/android-res')
+
+            // 重要：删除了对 'build/extra-jni-libs' 的显式引用
+            // AGP 会自动处理生成的 Rust 库和 NDK 运行时
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // 如果有多个库提供 libc++_shared.so，优先选第一个（通常是 NDK 官方提供的）
+            pickFirsts.add("**/libc++_shared.so")
+            // 建议：确保 so 库在 APK 中是对齐的，解决 getauxval 崩溃的关键
+            useLegacyPackaging = false
+        }
+    }
+}
+
+cargo {
+    // 你的 Rust 项目路径
+    module = "../../unm"
+    libname = "unm"
+    targets = ["arm64"]
+    profile = project.hasProperty("release") ? "release" : "debug"
+}
+
+// 移除了 copyLibCppShared 任务，不再手动操作文件系统
+
+tasks.configureEach { task ->
+    // 确保在 Java 编译前 Rust 已经编译完成
+    if (name.startsWith("javaPreCompile")) {
+        dependsOn("cargoBuild")
+    }
+}
+
+dependencies {
+    implementation libs.appcompat
+    implementation libs.games.activity
+}

@@ -1,0 +1,13 @@
+[versions]
+agp = "8.4.0"
+appcompat = "1.6.1"
+gamesActivity = "2.0.2"
+rustAndroidGradle = "0.9.6"
+
+[libraries]
+appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+games-activity = { group = "androidx.games", name = "games-activity", version.ref = "gamesActivity" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+rustAndroidGradle = { id = "org.mozilla.rust-android-gradle.rust-android", version.ref = "rustAndroidGradle" }

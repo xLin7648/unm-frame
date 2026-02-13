@@ -1,0 +1,38 @@
+[package]
+name = "unm-sfx"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.101"
+symphonia = { version = "0.5.5", features = ["mp3", "aac", "ogg", "flac", "wav"] }
+ringbuf = "0.4.8"
+
+unm-tools = { path = "../unm-tools" }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+cpal = "0.17.1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+oboe = "0.6.1"
+
+[profile.release]
+# 1. 启用 LTO (Link Time Optimization)
+# 允许编译器跨 Crate 进行内联优化，这对 crossbeam 和 symphonia 非常有效
+lto = "fat"
+
+# 2. 代码生成单元设为 1
+# 强制编译器将整个项目作为一个整体进行优化，能发现更多内联机会，但编译很慢
+codegen-units = 1
+
+# 3. 优化等级 3
+opt-level = 3
+
+# 4. 这里的 panic 策略设为 'abort'
+# 移除异常处理的栈展开逻辑，减少二进制体积并让 CPU 分支预测更清爽
+# 音频线程如果 Panic 直接停止，避免产生不可控的音频噪音
+panic = "abort"
+
+# 5. 符号表剥离（可选）
+# 如果不需要调试，可以把符号表剥离掉，减少文件体积，对速度影响较小
+strip = true

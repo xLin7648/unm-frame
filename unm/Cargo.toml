@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+
+members = ["unm", "unm-sfx", "unm-tools"]
+
+[profile.dev]
+opt-level = 3
+[profile.dev.package."*"]
+opt-level = 3
