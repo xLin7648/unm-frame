@@ -1,6 +1,9 @@
 // src/input.rs
 use std::collections::HashMap; // 需要引入HashMap来存储多个Touch
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use winit::event::MouseButton;
 
 /// 定义鼠标按钮状态，用于表示某个按钮当前是否被按下。
@@ -46,23 +49,26 @@ pub struct Touch {
     pub prev_x: f32,
     pub prev_y: f32,
     // delta_x, delta_y 可以在 get_touch_delta_position 实时计算
+
+    // 关键：如果这一帧 busy (是 Began)，先把后续状态存起来
+    pub pending_phase: Option<TouchPhase>,
 }
 
 /// 定义需要从主线程发送到渲染线程的鼠标和触控事件。
 #[derive(Debug, Clone, Copy)]
-pub enum InputEvent { // 将MouseEvent更名为InputEvent，包含更多类型
+pub enum InputEvent {
+    // 将MouseEvent更名为InputEvent，包含更多类型
     /// 鼠标按钮被按下或释放
     MouseButton {
         button: MouseButton,
         state: MouseButtonState,
     },
     /// 触控事件 (类似 winit::event::Touch)
-    Touch(winit::event::Touch)
-    // 鼠标移动事件（可选，如果需要）
-    // CursorMoved {
-    //     x: f64,
-    //     y: f64,
-    // },
+    Touch(winit::event::Touch), // 鼠标移动事件（可选，如果需要）
+                                // CursorMoved {
+                                //     x: f64,
+                                //     y: f64,
+                                // },
 }
 
 /// 渲染线程中用于查询鼠标按键状态的结构体。
@@ -149,80 +155,75 @@ impl TouchInput {
         TouchInput::default()
     }
 
-    /// 在处理本帧的 `WinitTouch` 事件之前调用。
-    /// 这个方法负责：
-    /// 1. 移除上一帧标记为 Ended 或 Cancelled 的触控点。
-    /// 2. 更新其余触控点的 phase (若无新事件则变为 Stationary) 和 prev_x/prev_y。
     pub fn begin_frame(&mut self) {
-        // 移除上一帧标记为 Ended 或 Cancelled 的触控点
+        // 1. 移除上一帧已经完成寿命的点
         self.active_touches.retain(|_id, touch| {
             !(touch.phase == TouchPhase::Ended || touch.phase == TouchPhase::Cancelled)
         });
 
-        // 遍历剩余的活跃触控点，更新它们的阶段和上一帧位置
+        // 2. 状态平滑过渡
         for touch in self.active_touches.values_mut() {
-            // 将当前位置保存为上一帧位置，为计算delta做准备
             touch.prev_x = touch.x;
             touch.prev_y = touch.y;
 
-            // 如果该触控点在上一帧是 Began 或 Moved，并且本帧没有新的 Moved 事件来更新它，
-            // 那么它将被视为 Stationary。
-            // Started 事件会设置为 Began，Moved 事件会设置为 Moved，因此这里处理的是那些没有新事件的
-            if touch.phase == TouchPhase::Began || touch.phase == TouchPhase::Moved {
-                touch.phase = TouchPhase::Stationary;
+            // 如果有挂起的（延迟的）状态，现在应用它
+            if let Some(pending) = touch.pending_phase.take() {
+                touch.phase = pending;
+            } else {
+                // 常规状态切换
+                match touch.phase {
+                    TouchPhase::Began => touch.phase = TouchPhase::Stationary,
+                    TouchPhase::Moved => touch.phase = TouchPhase::Stationary,
+                    _ => {}
+                }
             }
-            // 如果已经是 Stationary，则保持 Stationary
         }
     }
 
-    /// 根据接收到的 `winit::event::Touch` 事件更新内部的触控状态。
-    /// 这个方法会创建新的触控点，或更新现有触控点的信息和阶段。
     pub fn update_touch_event(&mut self, winit_touch: &winit::event::Touch) {
         let id = winit_touch.id;
         let x = winit_touch.location.x as f32;
         let y = winit_touch.location.y as f32;
+        let phase = winit_touch.phase;
 
-        // 获取或创建触控点
-        let touch_entry = self.active_touches.entry(id).or_insert_with(|| Touch {
-            id,
-            x,
-            y, // 此时x,y是当前位置
-            phase: TouchPhase::Began, // 会在下面根据winit_touch.phase更新
-            prev_x: x, // 对新创建的触控点，prev_x/y与当前x/y相同
-            prev_y: y,
-        });
+        if !self.active_touches.contains_key(&id) {
+            self.active_touches.insert(
+                id,
+                Touch {
+                    id,
+                    x,
+                    y,
+                    phase: TouchPhase::Began, // 初始必为 Began
+                    prev_x: x,
+                    prev_y: y,
+                    pending_phase: None,
+                },
+            );
+            return;
+        }
 
-        // 更新触控点状态
-        match winit_touch.phase {
-            winit::event::TouchPhase::Started => {
-                // 如果是Started，说明这是新触控
-                touch_entry.phase = TouchPhase::Began;
-                touch_entry.x = x; // 确保位置更新
-                touch_entry.y = y;
-                // prev_x, prev_y 保持为起始位置，在下一帧begin_frame会被覆盖
-            }
-            winit::event::TouchPhase::Moved => {
-                // 更新现有触控点的位置和阶段
-                if touch_entry.phase != TouchPhase::Began {
-                    touch_entry.phase = TouchPhase::Moved;
+        if let Some(touch) = self.active_touches.get_mut(&id) {
+            // 更新最新坐标
+            touch.x = x;
+            touch.y = y;
+
+            let new_phase = match phase {
+                winit::event::TouchPhase::Started => TouchPhase::Began,
+                winit::event::TouchPhase::Moved => TouchPhase::Moved,
+                winit::event::TouchPhase::Ended => TouchPhase::Ended,
+                winit::event::TouchPhase::Cancelled => TouchPhase::Cancelled,
+            };
+
+            // 如果当前已经是 Began，不要覆盖它，把新状态存入 pending
+            if touch.phase == TouchPhase::Began {
+                // 如果 Began 后面跟着 Ended，确保 pending 记录的是 Ended
+                if new_phase != TouchPhase::Began {
+                    touch.pending_phase = Some(new_phase);
                 }
-                touch_entry.x = x;
-                touch_entry.y = y;
-                // prev_x, prev_y 会在 begin_frame 中被更新
+            } else {
+                // 如果不是 Began 帧，正常更新状态
+                touch.phase = new_phase;
             }
-            winit::event::TouchPhase::Ended => {
-                // 标记为结束，这一帧内仍然可见，但在下一帧的 begin_frame 中会被移除
-                touch_entry.phase = TouchPhase::Ended;
-                touch_entry.x = x; // 确保结束位置是最新的
-                touch_entry.y = y;
-            }
-            winit::event::TouchPhase::Cancelled => {
-                // 标记为取消，这一帧内仍然可见，但在下一帧的 begin_frame 中会被移除
-                touch_entry.phase = TouchPhase::Cancelled;
-                touch_entry.x = x; // 确保取消位置是最新的
-                touch_entry.y = y;
-            }
-            _ => {} // 忽略其他阶段（如 ForceChange）
         }
     }
 

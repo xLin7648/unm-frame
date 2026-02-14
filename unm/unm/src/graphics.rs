@@ -364,7 +364,11 @@ impl WgpuState {
     // 它应该只处理默认渲染目标的解析和呈现。
     pub(crate) fn render(&mut self) -> Result<(), SurfaceError> {
         let context = &self.context;
-        let output = context.surface.get_current_texture()?;
+        if context.surface.is_none() {
+            return Err(wgpu::SurfaceError::Lost);
+        }
+
+        let output = context.surface.as_ref().unwrap().get_current_texture()?;
 
         if let Some(rt) = self.render_targets.get(self.default_render_target) {
             let mut encoder =
@@ -851,44 +855,49 @@ impl WgpuState {
 // 简易绘制部分
 impl WgpuState {
     #[rustfmt::skip]
-    pub fn draw_rectangle(
+    pub fn draw_rectangle_rotated(
         &mut self,
-        center_x: f32, // 矩形“逻辑”上的中心点或参考点
+        center_x: f32, // 旋转的中心点（即 Pivot 点在世界空间的位置）
         center_y: f32,
         width: f32,
         height: f32,
+        r: f32, // Z 轴旋转弧度
         color: wgpu::Color,
         z_order: u32,
-        pivot: glam::Vec2, // 新增参数：pivot，表示轴心点，范围通常是[0.0, 1.0]
+        pivot: glam::Vec2, // 轴心点，范围 [0.0, 1.0]
     ) {
-        // 首先计算矩形在没有考虑Pivot时的“理论”左下角和右上角
-        // 这里的center_x, center_y将作为pivot点的实际坐标
+        use glam::{Vec3, Quat, vec3, vec2};
 
-        // 计算Pivot点相对于矩形宽高的偏移量
-        let pivot_offset_x = width * pivot.x;
-        let pivot_offset_y = height * pivot.y;
+        // 1. 计算矩形的四个角相对于 Pivot 点的本地偏移
+        // 例如：如果 pivot 是 (0.5, 0.5)，则偏移范围是 (-0.5*w, -0.5*h) 到 (0.5*w, 0.5*h)
+        let left   = -width  * pivot.x;
+        let right  =  width  * (1.0 - pivot.x);
+        let bottom = -height * pivot.y;
+        let top    =  height * (1.0 - pivot.y);
 
-        // 根据“逻辑中心点”(center_x, center_y) 和 pivot 算出矩形左下角的真实坐标
-        // 矩形左下角 = (逻辑中心x - (pivot.x * width)), (逻辑中心y - (pivot.y * height))
-        let actual_bottom_left_x = center_x - pivot_offset_x;
-        let actual_bottom_left_y = center_y - pivot_offset_y;
+        // 2. 创建旋转四元数 (绕 Z 轴)
+        let rotation = Quat::from_rotation_z(r.to_radians());
 
-        // 然后根据实际的左下角和宽高，计算出所有顶点坐标
-        let left   = actual_bottom_left_x;
-        let right  = actual_bottom_left_x + width;
-        let bottom = actual_bottom_left_y;
-        let top    = actual_bottom_left_y + height;
+        // 3. 定义顶点位置（相对于中心点进行旋转变换）
+        // 旋转公式: rotated_pos = rotation * local_pos + center_pos
+        let transform_point = |x: f32, y: f32| -> Vec3 {
+            let local_pos = vec3(x, y, 0.0);
+            let rotated_pos = rotation * local_pos;
+            vec3(rotated_pos.x + center_x, rotated_pos.y + center_y, 0.0)
+        };
 
-        // 顶点定义 (沿用之前的约定：0=TL, 1=TR, 2=BR, 3=BL)
         let vertices = [
-            Vertex::new(vec3(left , top   , 0.0), vec2(0.0, 0.0), color), // 0: Top-left
-            Vertex::new(vec3(right, top   , 0.0), vec2(1.0, 0.0), color), // 1: Top-right
-            Vertex::new(vec3(right, bottom, 0.0), vec2(1.0, 1.0), color), // 2: Bottom-right
-            Vertex::new(vec3(left , bottom, 0.0), vec2(0.0, 1.0), color), // 3: Bottom-left
+            // 0: Top-left
+            Vertex::new(transform_point(left, top),     vec2(0.0, 0.0), color),
+            // 1: Top-right
+            Vertex::new(transform_point(right, top),    vec2(1.0, 0.0), color),
+            // 2: Bottom-right
+            Vertex::new(transform_point(right, bottom), vec2(1.0, 1.0), color),
+            // 3: Bottom-left
+            Vertex::new(transform_point(left, bottom),  vec2(0.0, 1.0), color),
         ];
 
-        // 三角形1: (3)BL -> (2)BR -> (0)TL  (逆时针)
-        // 三角形2: (0)TL -> (2)BR -> (1)TR  (逆时针)
+        // 索引保持不变
         let indices: [u32; 6] = [3, 2, 0, 0, 2, 1];
 
         self.record_draw_command(&vertices, &indices, z_order);

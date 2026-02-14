@@ -8,7 +8,7 @@ use crate::texture::Texture2D;
 
 pub(crate) struct RenderContext {
     pub(crate) instance: Instance,
-    pub(crate) surface: Surface<'static>,
+    pub(crate) surface: Option<Surface<'static>>,
     pub(crate) adapter: Adapter,
     pub(crate) device: Device,
     pub(crate) queue: Queue,
@@ -119,19 +119,51 @@ impl RenderContext {
 
         Ok(Self {
             instance,
-            surface,
             adapter,
             device,
             queue,
             config,
+            surface: Some(surface),
         })
+    }
+
+    /// 销毁 WGPU Surface，使其在后台时不占用资源。
+    pub fn destroy_surface(&mut self) {
+        if self.surface.is_some() {
+            self.surface.take(); // 销毁 Surface
+            info!("WGPU Surface destroyed.");
+        }
+    }
+
+    pub fn resume(&mut self, window: &'static Window) -> PhysicalSize<u32> {
+        // Window size is only actually valid after we enter the event loop.
+        let window_size = window.inner_size();
+        let width = window_size.width.max(1);
+        let height = window_size.height.max(1);
+
+        info!("Surface resume {window_size:?}");
+
+        let surface = self.instance.create_surface(window).unwrap();
+
+        let config = &mut self.config;
+
+        config.width = width;
+        config.height = height;
+
+        surface.configure(&self.device, &config);
+
+        self.surface = Some(surface);
+        window_size
     }
 
     // 窗口大小改变时调用
     pub(crate) fn resize(&mut self, new_size: PhysicalSize<u32>) {
         self.config.width = new_size.width;
         self.config.height = new_size.height;
-        self.surface.configure(&self.device, &self.config);
+
+        if let Some(surface) = &mut self.surface {
+            surface.configure(&self.device, &self.config);
+        }
     }
 
     // 辅助函数，负责将图像文件加载为 wgpu::Texture

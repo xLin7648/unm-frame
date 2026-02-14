@@ -1,12 +1,12 @@
 use crossbeam_queue::ArrayQueue;
 use log::*;
-use unm_sfx::player::SfxManager;
-use std::{
-    mem::ManuallyDrop,
-    sync::{Arc, mpsc::{self, Sender}},
-    time::Duration,
+use std::{mem::ManuallyDrop, sync::{Arc, mpsc::{self, Sender, channel}}, time::Duration};
+use tokio::{
+    runtime::Runtime,
+    task::JoinHandle,
+    time::sleep,
 };
-use tokio::{runtime::Runtime, task::JoinHandle, time::sleep};
+use unm_sfx::player::SfxManager;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -16,7 +16,13 @@ use winit::{
 };
 
 use crate::{
-    CONTEXT, WgpuState, game_loop::GameLoop, game_settings::GameSettings, get_quad_context, input::{InputEvent, MouseButtonState, MouseInput, TouchInput}, resolution::Resolution, tools::*
+    game_loop::GameLoop,
+    game_settings::GameSettings,
+    get_context, get_quad_context,
+    input::{InputEvent, MouseButtonState, MouseInput, TouchInput},
+    resolution::Resolution,
+    tools::*,
+    WgpuState, CONTEXT,
 };
 
 /// 渲染线程可以发送给主线程的命令，用于控制窗口行为。
@@ -31,8 +37,7 @@ pub enum WindowCommand {
     /// 请求重新设置窗口分辨率。这会触发 `WindowEvent::Resized`。
     SetResolution(Resolution),
     // 还可以添加更多命令，例如 SetCursorIcon, SetDecorations 等。
-
-    Quit
+    Quit,
 }
 
 /// 渲染线程可以接收的命令。
@@ -41,6 +46,10 @@ enum WgpuStateCommand {
     Resize(PhysicalSize<u32>),
     /// 关闭渲染线程。
     Close,
+
+    Resume,
+
+    Suspended,
 }
 
 /// 应用程序的主结构，管理 winit 窗口、WGPU 状态和渲染线程。
@@ -68,8 +77,7 @@ pub struct App {
     /// 游戏的实例
     game: Option<Box<dyn GameLoop>>,
 
-    /// 用于从主线程向渲染线程发送鼠标事件的队列。
-    mouse_event_sender: Arc<ArrayQueue<InputEvent>>, // 添加鼠标事件发送队列
+    input_event_sender: Arc<ArrayQueue<InputEvent>>,
 }
 
 impl App {
@@ -97,7 +105,7 @@ impl App {
 
             game: Some(Box::new(game)),
 
-            mouse_event_sender: Arc::new(ArrayQueue::new(128)), // 初始化队列，大小可调整
+            input_event_sender: Arc::new(ArrayQueue::new(128)), // 初始化队列，大小可调整
         }
     }
 
@@ -154,10 +162,11 @@ impl App {
         unsafe { CONTEXT = Some(wgpu_state_initial) };
 
         // 创建渲染命令频道
-        let (render_command_sender, render_command_receiver) = mpsc::channel();
+        let (render_command_sender, render_command_receiver) = channel();
+
         self.render_command_sender = Some(render_command_sender);
 
-        let mouse_event_queue = Arc::clone(&self.mouse_event_sender);
+        let mouse_event_queue = Arc::clone(&self.input_event_sender);
 
         // 初始化 Tokio 运行时（如果尚未初始化）
         self.runtime = Some(
@@ -181,9 +190,10 @@ impl App {
                 render_command_receiver,
                 event_proxy.clone(),
                 mouse_event_queue, // 传递鼠标事件队列
-                window_ref, // 传递 &'static Window
-                game,       // 传递游戏实例
-            ).await;
+                window_ref,        // 传递 &'static Window
+                game,              // 传递游戏实例
+            )
+            .await;
         });
         self.render_thread_handle = Some(render_thread_handle);
         Ok(())
@@ -209,11 +219,13 @@ impl App {
 
         wgpu_state.end_frame(&mut game_settings);
 
-        // 移动端优化：当窗口过小时降低渲染频率
+        // 移动端优化：当应用到后台时降低主循环更新频率
         let sleep_rate_limit: Duration = Duration::from_secs(1);
         let mut time_manager = TimeManager::new();
+        let mut first_loop = true;
 
         loop {
+            let mut game_ready = false;
             let mut new_size: Option<PhysicalSize<u32>> = None;
             while let Ok(command) = wgpu_state_receiver.try_recv() {
                 match command {
@@ -225,6 +237,14 @@ impl App {
                         info!("Render thread received close command. Exiting render loop.");
                         return;
                     }
+                    WgpuStateCommand::Resume => {
+                        let size = get_context().resume(window_ref);
+                        game_settings.current_window_size = size;
+                        game_ready = true;
+                    }
+                    WgpuStateCommand::Suspended => {
+                        game_settings.current_window_size = PhysicalSize::new(1, 1);
+                    },
                 }
             }
 
@@ -239,7 +259,7 @@ impl App {
                     }
                     InputEvent::Touch(touch) => {
                         touch_input.update_touch_event(&touch);
-                    },
+                    }
                 }
             }
 
@@ -268,7 +288,14 @@ impl App {
 
             {
                 // 游戏逻辑
-                game.update(&mut game_settings, &time_manager, &mut sfx_manager, &mouse_input, &touch_input).await;
+                game.update(
+                    &mut game_settings,
+                    &time_manager,
+                    &mut sfx_manager,
+                    &mouse_input,
+                    &touch_input,
+                )
+                .await;
             }
 
             wgpu_state.draw();
@@ -276,12 +303,12 @@ impl App {
             match wgpu_state.render() {
                 Ok(_) => {}
                 Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => { // 添加 Outdated 处理
-                    // Surface 丢失或过时，通常需要重新配置。
-                    // 虽然你在 loop 开头已经 resize 了，但这里再次触发 resize 也是安全的，或者不仅由于大小改变，
-                    // 某些驱动行为也要求重新 configure。
-                    if wgpu_state.size.width > 0 && wgpu_state.size.height > 0 {
-                        wgpu_state.resize(wgpu_state.size);
-                    }
+                     // Surface 丢失或过时，通常需要重新配置。
+                     // 虽然你在 loop 开头已经 resize 了，但这里再次触发 resize 也是安全的，或者不仅由于大小改变，
+                     // 某些驱动行为也要求重新 configure。
+                     // if wgpu_state.size.width > 0 && wgpu_state.size.height > 0 {
+                     //     wgpu_state.resize(wgpu_state.size);
+                     // }
                 }
                 Err(wgpu::SurfaceError::OutOfMemory) => {
                     error!("Render thread: Out of GPU memory...");
@@ -294,13 +321,13 @@ impl App {
             wgpu_state.end_frame(&mut game_settings);
             sfx_manager.maintain_stream();
 
-            //tokio::task::yield_now().await; // 仅让出时间片，不长时间休眠
-            //进行帧率限制
-            if new_size.is_some() {
-                tokio::task::yield_now().await; // 仅让出时间片，不长时间休眠
-            } else {
-                framerate_limiter(window_ref, &mut time_manager, &game_settings);//.await;
+            #[cfg(target_os = "android")]
+            if game_ready || first_loop {
+                call_game_ready();
+                first_loop = false;
             }
+
+            framerate_limiter(window_ref, &mut time_manager, &game_settings); //.await;
         }
     }
 }
@@ -376,8 +403,25 @@ impl ApplicationHandler<WindowCommand> for App {
             info!("Application resumed, initializing window and WGPU...");
             self.initialize_app_components(event_loop);
         } else {
+            let sender = self
+                .render_command_sender
+                .as_ref()
+                .expect("Render command sender should be initialized for window events");
+
+            let _ = sender.send(WgpuStateCommand::Resume);
             info!("Application resumed. Window and WGPU already initialized.");
         }
+    }
+
+    fn suspended(&mut self, _: &ActiveEventLoop) {
+        get_context().destroy_surface();
+
+        let sender = self
+            .render_command_sender
+            .as_ref()
+            .expect("Render command sender should be initialized for window events");
+
+        let _ = sender.send(WgpuStateCommand::Suspended);
     }
 
     /// 处理窗口事件。
@@ -395,7 +439,7 @@ impl ApplicationHandler<WindowCommand> for App {
             .as_ref()
             .expect("Render command sender should be initialized for window events");
 
-        let input_event_sender = self.mouse_event_sender.as_ref();
+        let input_event_sender = self.input_event_sender.as_ref();
         if window_id != window.id() {
             return;
         }
@@ -413,37 +457,20 @@ impl ApplicationHandler<WindowCommand> for App {
                 let _ = sender.send(WgpuStateCommand::Close);
                 _event_loop.exit();
             }
-            WindowEvent::MouseInput {
-                state,
-                button,
-                ..
-            } => {
+            WindowEvent::MouseInput { state, button, .. } => {
                 let button_state = match state {
                     winit::event::ElementState::Pressed => MouseButtonState::Pressed,
                     winit::event::ElementState::Released => MouseButtonState::Released,
                 };
                 // 将鼠标事件发送给渲染线程
-                if let Err(e) = input_event_sender.push(InputEvent::MouseButton { button, state: button_state }) {
+                if let Err(e) = input_event_sender.push(InputEvent::MouseButton {
+                    button,
+                    state: button_state,
+                }) {
                     warn!("Failed to send mouse event to render thread: {:?}", e);
                 }
             }
             WindowEvent::Touch(touch) => {
-                let button_state = match touch.phase {
-                    winit::event::TouchPhase::Started => MouseButtonState::Pressed,
-                    winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled => MouseButtonState::Released,
-                    _ => return, // 对于Moved或其他阶段，如果我们只关心按下/抬起，则直接返回
-                };
-
-                // 手机触摸通常没有“右键”或“中键”的概念，
-                // 我们将其映射为左键 (MouseButton::Left)
-                let button = winit::event::MouseButton::Left;
-
-                if let Err(e) = input_event_sender.push(InputEvent::MouseButton { button, state: button_state }) {
-                    warn!("Failed to send touch event as mouse event to render thread: {:?}", e);
-                }
-
-                // info!("DEBUG: Received Raw Event - ID: {:?}, Phase: {:?}", touch.id, touch.phase); // 这里的 phase 是 winit 的
-
                 // 直接发送原始的Touch事件到渲染线程
                 if let Err(e) = input_event_sender.push(InputEvent::Touch(touch)) {
                     warn!("Failed to send touch event to render thread: {:?}", e);

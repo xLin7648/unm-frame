@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 继承自 AppCompat 的无标题栏全屏主题 -->
+    <style name="Theme.App" parent="Theme.AppCompat.NoActionBar">
+        <!-- 强制窗口背景为纯黑，解决冷启动瞬间的灰色闪烁 -->
+        <item name="android:windowBackground">@android:color/black</item>
+        <!-- 移除窗口默认标题栏 -->
+        <item name="windowNoTitle">true</item>
+        <item name="windowActionBar">false</item>
+        <!-- 全屏设置 -->
+        <item name="android:windowFullscreen">true</item>
+        <!-- 允许内容绘制到刘海区域 (Android 9+) -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

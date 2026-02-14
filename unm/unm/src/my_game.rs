@@ -25,17 +25,14 @@ use crate::{
 
 #[allow(dead_code)]
 pub struct MyGame {
-    m1: f32,
-    m2: f32,
-
+    r: f32,
     handle: SfxHandle,
 }
 
 impl Default for MyGame {
     fn default() -> Self {
         Self {
-            m1: 0.,
-            m2: 0.,
+            r: 0.,
             handle: SfxHandle::default(),
         }
     }
@@ -44,7 +41,7 @@ impl Default for MyGame {
 #[async_trait]
 impl GameLoop for MyGame {
     async fn start(&mut self, game_settings: &mut GameSettings, sfx_manager: &mut SfxManager) {
-        game_settings.set_msaa(Msaa::Off);
+        game_settings.set_msaa(Msaa::Sample4);
         game_settings.set_resolution(Resolution::Physical(1280, 720));
         // game_settings.set_target_fps(120);
 
@@ -79,25 +76,29 @@ impl GameLoop for MyGame {
         mouse_input: &MouseInput,
         touch_input: &TouchInput,
     ) {
+        self.r += time_manager.get_delta_time() * 10.0;
+
         let render = get_quad_context();
 
-        render.draw_rectangle(
+        render.draw_rectangle_rotated(
             -50.0,
             0.0,
             100.0,
             100.0,
+            0.0,
             wgpu::Color::RED,
             0,
             vec2(0.5, 0.5),
         );
 
-        //render.clear_background(wgpu::Color::WHITE);
+        render.clear_background(wgpu::Color::WHITE);
 
-        render.draw_rectangle(
+        render.draw_rectangle_rotated(
             0.0,
             0.0,
             100.0,
             100.0,
+            self.r,
             wgpu::Color::GREEN,
             1,
             vec2(0.5, 0.5),
@@ -121,11 +122,12 @@ impl GameLoop for MyGame {
                 sfx_manager.play(self.handle); // 每增加一根手指响一次
             }
 
-            render.draw_rectangle(
+            render.draw_rectangle_rotated(
                 50.0,
                 0.0,
                 100.0,
                 100.0,
+                0.0,
                 wgpu::Color::BLUE,
                 0,
                 vec2(0.5, 0.0),

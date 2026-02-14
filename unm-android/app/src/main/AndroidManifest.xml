@@ -6,14 +6,15 @@
         android:icon="@mipmap/ic_launcher"
         android:label="Bevy Example"
         android:roundIcon="@mipmap/ic_launcher"
-        android:theme="@style/Theme.AppCompat.NoActionBar"
+        android:theme="@style/Theme.App"
         tools:targetApi="33">
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="layoutDirection|locale|orientation|keyboardHidden|screenSize|smallestScreenSize|density|keyboard|navigation|screenLayout|uiMode"
-            android:theme="@style/Theme.AppCompat.NoActionBar"
+            android:theme="@style/Theme.App"
             android:screenOrientation="sensorLandscape"
+            android:launchMode="singleTask"
             tools:ignore="DiscouragedApi">
             <meta-data
                 android:name="android.app.lib_name"
